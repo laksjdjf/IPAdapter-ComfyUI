@@ -91,19 +91,20 @@ class IPAdapter:
         self.uncond_image_emb = self.uncond_image_emb.to(device, dtype=dtype)
         self.cond_uncond_image_emb = None
         
+        new_model = model.clone()
         #input
         number = 0
         for id in [1,2,4,5,7,8]:
-            model.set_model_attn2_replace(self.patch_forward(number), "input", id)
+            new_model.set_model_attn2_replace(self.patch_forward(number), "input", id)
             number += 1
         #output
         for id in [3,4,5,6,7,8,9,10,11]:
-            model.set_model_attn2_replace(self.patch_forward(number), "output", id)
+            new_model.set_model_attn2_replace(self.patch_forward(number), "output", id)
             number += 1
         #middle
-        model.set_model_attn2_replace(self.patch_forward(number), "middle", 0)
+        new_model.set_model_attn2_replace(self.patch_forward(number), "middle", 0)
 
-        return (model,)
+        return (new_model,)
     
     def patch_forward(self, number):
         def forward(n, context_attn2, value_attn2, extra_options):
