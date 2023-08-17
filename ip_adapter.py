@@ -1,6 +1,5 @@
 import torch
 import os
-import copy
 
 CURRENT_DIR = os.path.dirname(os.path.realpath(__file__))
 
@@ -26,15 +25,12 @@ class ImageProjModel(torch.nn.Module):
 class To_KV(torch.nn.Module):
     def __init__(self):
         super().__init__()
-        channels = [320, 320, 320, 320, 640, 640, 640, 640, 1280, 1280, 1280, 1280, 1280, 1280, 1280, 1280, 1280, 1280, 1280, 1280, 640, 640, 640, 640, 640, 640, 320, 320, 320, 320, 320, 320]
+        channels = [320, 320, 320, 320, 640, 640, 640, 640, 1280, 1280, 1280, 1280, 1280, 1280, 1280, 1280, 1280, 1280, 640, 640, 640, 640, 640, 640, 320, 320, 320, 320, 320, 320, 1280, 1280]
         self.to_kvs = torch.nn.ModuleList([torch.nn.Linear(768, channel, bias=False) for channel in channels])
         
     def load_state_dict(self, state_dict):
-        indice = list(range(0,12)) # down
-        indice.extend(list(range(14, 32))) # up
-        indice.extend([12,13]) # down
         for i, key in enumerate(state_dict.keys()):
-            self.to_kvs[indice[i]].weight.data = state_dict[key]
+            self.to_kvs[i].weight.data = state_dict[key]
     
 class IPAdapterModel:
     def __init__(self, ip_ckpt):
@@ -94,45 +90,48 @@ class IPAdapter:
         self.image_emb = self.image_emb.to(device, dtype=dtype)
         self.uncond_image_emb = self.uncond_image_emb.to(device, dtype=dtype)
         self.cond_uncond_image_emb = None
-        new_model = copy.deepcopy(model)
-        self.hook_forwards(new_model.model.diffusion_model)
         
-        return (new_model,)
+        #input
+        number = 0
+        for id in [1,2,4,5,7,8]:
+            model.set_model_attn2_replace(self.patch_forward(number), "input", id)
+            number += 1
+        #output
+        for id in [3,4,5,6,7,8,9,10,11]:
+            model.set_model_attn2_replace(self.patch_forward(number), "output", id)
+            number += 1
+        #middle
+        model.set_model_attn2_replace(self.patch_forward(number), "middle", 0)
+
+        return (model,)
     
-    def hook_forwards(self, root_module: torch.nn.Module):
-        i = 0
-        for name, module in root_module.named_modules():
-            if "attn2" in name and "CrossAttention" in module.__class__.__name__:
-                module.forward = self.hook_forward(module, i)
-                i += 1
-    
-    def hook_forward(self, module, i):
-        def forward(x, context=None, value=None, mask=None):
-            q = module.to_q(x)
-            k = module.to_k(context)
-            v = module.to_v(context)
+    def patch_forward(self, number):
+        def forward(n, context_attn2, value_attn2, extra_options):
+            q = n
+            k = context_attn2
+            v = value_attn2
             b, _, _ = q.shape
 
             if self.cond_uncond_image_emb is None or self.cond_uncond_image_emb.shape[0] != b:
                 self.cond_uncond_image_emb = torch.cat([self.uncond_image_emb.repeat(b//2, 1, 1), self.image_emb.repeat(b//2, 1, 1)], dim=0)
 
-            ip_k = self.ipadapter.ip_layers.to_kvs[i*2](self.cond_uncond_image_emb)
-            ip_v = self.ipadapter.ip_layers.to_kvs[i*2+1](self.cond_uncond_image_emb)
+            ip_k = self.ipadapter.ip_layers.to_kvs[number*2](self.cond_uncond_image_emb)
+            ip_v = self.ipadapter.ip_layers.to_kvs[number*2+1](self.cond_uncond_image_emb)
 
             q, k, v, ip_k, ip_v = map(
-                lambda t: t.view(b, -1, module.heads, module.dim_head).transpose(1, 2),
+                lambda t: t.view(b, -1, extra_options["n_heads"], extra_options["dim_head"]).transpose(1, 2),
                 (q, k, v, ip_k, ip_v),
             )
 
             out = torch.nn.functional.scaled_dot_product_attention(q, k, v, attn_mask=None, dropout_p=0.0, is_causal=False)
-            out = out.transpose(1, 2).reshape(b, -1, module.heads * module.dim_head)
+            out = out.transpose(1, 2).reshape(b, -1, extra_options["n_heads"] * extra_options["dim_head"])
 
             ip_out = torch.nn.functional.scaled_dot_product_attention(q, ip_k, ip_v, attn_mask=None, dropout_p=0.0, is_causal=False)
-            ip_out = ip_out.transpose(1, 2).reshape(b, -1, module.heads * module.dim_head)
+            ip_out = ip_out.transpose(1, 2).reshape(b, -1, extra_options["n_heads"] * extra_options["dim_head"])
 
             out = out + ip_out * self.weight
 
-            return module.to_out(out)
+            return out
 
         return forward
         
