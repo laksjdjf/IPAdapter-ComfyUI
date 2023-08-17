@@ -1,5 +1,5 @@
 # IPAdapter-ComfyUI
-[IP-Adapter](https://github.com/tencent-ailab/IP-Adapter)の実験的な実装です。
+[IP-Adapter](https://github.com/tencent-ailab/IP-Adapter)の実験的な実装です。とりあえず動けばいいという思想で実装しているので問題いっぱいありそうです。
 
 # Install
 1. custom_nodesにくろーん
