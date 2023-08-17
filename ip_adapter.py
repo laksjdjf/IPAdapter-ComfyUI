@@ -1,12 +1,11 @@
-from typing import Any, Mapping
 import torch
-from transformers import CLIPVisionModelWithProjection, CLIPImageProcessor
-from PIL import Image
 import os
 import copy
-import numpy as np
 
 CURRENT_DIR = os.path.dirname(os.path.realpath(__file__))
+
+def get_file_list(path):
+    return [file for file in os.listdir(path) if file != "put_models_here.txt"]
 
 class ImageProjModel(torch.nn.Module):
     """Projection Model"""
@@ -38,14 +37,11 @@ class To_KV(torch.nn.Module):
             self.to_kvs[indice[i]].weight.data = state_dict[key]
     
 class IPAdapterModel:
-    def __init__(self, image_encoder_path, ip_ckpt):
+    def __init__(self, ip_ckpt):
         super().__init__()
-        self.image_encoder_path = image_encoder_path
         self.ip_ckpt = ip_ckpt
         self.device = "cuda"
 
-        self.image_encoder = CLIPVisionModelWithProjection.from_pretrained(self.image_encoder_path).to("cuda", dtype=torch.float16)
-        self.clip_image_processor = CLIPImageProcessor()
         self.image_proj_model = ImageProjModel(cross_attention_dim=768, clip_embeddings_dim=1024,
                 clip_extra_context_tokens=4).to("cuda", dtype=torch.float16)
         
@@ -59,36 +55,25 @@ class IPAdapterModel:
         self.ip_layers.to("cuda")
         
     @torch.inference_mode()
-    def get_image_embeds(self, pil_image):
-        if isinstance(pil_image, Image.Image):
-            pil_image = [pil_image]
-        clip_image = self.clip_image_processor(images=pil_image, return_tensors="pt").pixel_values
-        clip_image_embeds = self.image_encoder(clip_image.to(self.device, dtype=torch.float16)).image_embeds
+    def get_image_embeds(self, clip_image_embeds):
         image_prompt_embeds = self.image_proj_model(clip_image_embeds)
         uncond_image_prompt_embeds = self.image_proj_model(torch.zeros_like(clip_image_embeds))
         return image_prompt_embeds, uncond_image_prompt_embeds
 
 class IPAdapter:
-
-    def __init__(self):
-        self.ipadapter = IPAdapterModel(
-            os.path.join(CURRENT_DIR,"IP-Adapter/models/image_encoder"),
-            os.path.join(CURRENT_DIR,"IP-Adapter/models/ip-adapter_sd15.bin")
-        )
-        print(self.ipadapter)
-
     @classmethod
     def INPUT_TYPES(s):
         return {
             "required": {
                 "model": ("MODEL", ),
-                "image": ("IMAGE",),
+                "clip_vision_output": ("CLIP_VISION_OUTPUT", ),
                 "weight": ("FLOAT", {
                     "default": 1, 
                     "min": -1, #Minimum value
                     "max": 3, #Maximum value
                     "step": 0.05 #Slider's step
                 }),
+                "model_name": (get_file_list(os.path.join(CURRENT_DIR,"models")), ),
             }
         }
     
@@ -96,17 +81,16 @@ class IPAdapter:
     FUNCTION = "adapter"
     CATEGORY = "loaders"
 
-    def adapter(self, model, image, weight):
+    def adapter(self, model, clip_vision_output, weight, model_name):
         dtype = model.model.diffusion_model.dtype
         device = "cuda"
         self.weight = weight
+        self.ipadapter = IPAdapterModel(
+            os.path.join(CURRENT_DIR, os.path.join(CURRENT_DIR, "models", model_name)),
+        )
         self.ipadapter.ip_layers.to(device, dtype=dtype)
-
-        tensor = image*255
-        tensor = np.array(tensor, dtype=np.uint8)
-        image = Image.fromarray(tensor[0])
-
-        self.image_emb, self.uncond_image_emb = self.ipadapter.get_image_embeds(image)
+        clip_vision_emb = clip_vision_output.image_embeds.to(device, dtype=torch.float16)
+        self.image_emb, self.uncond_image_emb = self.ipadapter.get_image_embeds(clip_vision_emb)
         self.image_emb = self.image_emb.to(device, dtype=dtype)
         self.uncond_image_emb = self.uncond_image_emb.to(device, dtype=dtype)
         self.cond_uncond_image_emb = None
