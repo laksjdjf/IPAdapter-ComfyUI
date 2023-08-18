@@ -1,10 +1,23 @@
 import torch
 import os
+from .image_preprocessor import pad_to_square, face_crop
 
 CURRENT_DIR = os.path.dirname(os.path.realpath(__file__))
 
+SD_V12_CHANNELS = [320] * 4 + [640] * 4 + [1280] * 10 + [640] * 6 + [320] * 6 + [1280] * 2
+SD_XL_CHANNELS = [640] * 8 + [1280] * 40 + [1280] * 60 + [640] * 12 + [1280] * 20
+
 def get_file_list(path):
     return [file for file in os.listdir(path) if file != "put_models_here.txt"]
+
+def set_model_patch_replace(model, patch, block_name, number, index):
+    name = "attn2"
+    to = model.model_options["transformer_options"]
+    if "patches_replace" not in to:
+        to["patches_replace"] = {}
+    if name not in to["patches_replace"]:
+        to["patches_replace"][name] = {}
+    to["patches_replace"][name][(block_name, number, index)] = patch
 
 class ImageProjModel(torch.nn.Module):
     """Projection Model"""
@@ -23,30 +36,33 @@ class ImageProjModel(torch.nn.Module):
         return clip_extra_context_tokens
     
 class To_KV(torch.nn.Module):
-    def __init__(self):
+    def __init__(self, cross_attention_dim):
         super().__init__()
-        channels = [320, 320, 320, 320, 640, 640, 640, 640, 1280, 1280, 1280, 1280, 1280, 1280, 1280, 1280, 1280, 1280, 640, 640, 640, 640, 640, 640, 320, 320, 320, 320, 320, 320, 1280, 1280]
-        self.to_kvs = torch.nn.ModuleList([torch.nn.Linear(768, channel, bias=False) for channel in channels])
+        channels = SD_XL_CHANNELS if cross_attention_dim == 2048 else SD_V12_CHANNELS
+        self.to_kvs = torch.nn.ModuleList([torch.nn.Linear(cross_attention_dim, channel, bias=False) for channel in channels])
         
     def load_state_dict(self, state_dict):
         for i, key in enumerate(state_dict.keys()):
             self.to_kvs[i].weight.data = state_dict[key]
     
 class IPAdapterModel:
-    def __init__(self, ip_ckpt):
+    def __init__(self, ip_ckpt, clip_embeddings_dim):
         super().__init__()
-        self.ip_ckpt = ip_ckpt
         self.device = "cuda"
-
-        self.image_proj_model = ImageProjModel(cross_attention_dim=768, clip_embeddings_dim=1024,
-                clip_extra_context_tokens=4).to("cuda", dtype=torch.float16)
+        state_dict = torch.load(ip_ckpt, map_location="cpu")
+        self.cross_attention_dim = state_dict["ip_adapter"]["1.to_k_ip.weight"].shape[1]
+        self.clip_extra_context_tokens = state_dict["image_proj"]["proj.weight"].shape[0] // self.cross_attention_dim
+        self.image_proj_model = ImageProjModel(
+            cross_attention_dim=self.cross_attention_dim,
+            clip_embeddings_dim=clip_embeddings_dim,
+            clip_extra_context_tokens=self.clip_extra_context_tokens
+        ).to("cuda", dtype=torch.float16)
         
-        self.load_ip_adapter()
+        self.load_ip_adapter(state_dict)
 
-    def load_ip_adapter(self):
-        state_dict = torch.load(self.ip_ckpt, map_location="cpu")
+    def load_ip_adapter(self, state_dict):
         self.image_proj_model.load_state_dict(state_dict["image_proj"])
-        self.ip_layers = To_KV()
+        self.ip_layers = To_KV(self.cross_attention_dim)
         self.ip_layers.load_state_dict(state_dict["ip_adapter"])
         self.ip_layers.to("cuda")
         
@@ -81,28 +97,48 @@ class IPAdapter:
         dtype = model.model.diffusion_model.dtype
         device = "cuda"
         self.weight = weight
+        
+        clip_vision_emb = clip_vision_output.image_embeds.to(device, dtype=torch.float16)
+        clip_embeddings_dim = clip_vision_emb.shape[1]
+
+        self.sdxl = clip_embeddings_dim == 1280 # 本当か？
+        
         self.ipadapter = IPAdapterModel(
             os.path.join(CURRENT_DIR, os.path.join(CURRENT_DIR, "models", model_name)),
+            clip_embeddings_dim = clip_embeddings_dim
         )
         self.ipadapter.ip_layers.to(device, dtype=dtype)
-        clip_vision_emb = clip_vision_output.image_embeds.to(device, dtype=torch.float16)
+
         self.image_emb, self.uncond_image_emb = self.ipadapter.get_image_embeds(clip_vision_emb)
         self.image_emb = self.image_emb.to(device, dtype=dtype)
         self.uncond_image_emb = self.uncond_image_emb.to(device, dtype=dtype)
         self.cond_uncond_image_emb = None
         
         new_model = model.clone()
-        #input
-        number = 0
-        for id in [1,2,4,5,7,8]:
-            new_model.set_model_attn2_replace(self.patch_forward(number), "input", id)
-            number += 1
-        #output
-        for id in [3,4,5,6,7,8,9,10,11]:
-            new_model.set_model_attn2_replace(self.patch_forward(number), "output", id)
-            number += 1
-        #middle
-        new_model.set_model_attn2_replace(self.patch_forward(number), "middle", 0)
+        if not self.sdxl:
+            number = 0
+            for id in [1,2,4,5,7,8]:
+                new_model.set_model_attn2_replace(self.patch_forward(number), "input", id)
+                number += 1
+            for id in [3,4,5,6,7,8,9,10,11]:
+                new_model.set_model_attn2_replace(self.patch_forward(number), "output", id)
+                number += 1
+            new_model.set_model_attn2_replace(self.patch_forward(number), "middle", 0)
+        else:
+            number = 0
+            for id in [4,5,7,8]:
+                block_indices = range(2) if id in [4, 5] else range(10)
+                for index in block_indices:
+                    set_model_patch_replace(new_model, self.patch_forward(number), "input", id, index)
+                    number += 1
+            for id in range(6):
+                block_indices = range(2) if id in [3, 4, 5] else range(10)
+                for index in block_indices:
+                    set_model_patch_replace(new_model, self.patch_forward(number), "output", id, index)
+                    number += 1
+            for index in range(10):
+                set_model_patch_replace(new_model, self.patch_forward(number), "middle", 0, index)
+                number += 1
 
         return (new_model,)
     
@@ -135,11 +171,36 @@ class IPAdapter:
             return out
 
         return forward
+    
+class ImageCrop:
+    @classmethod
+    def INPUT_TYPES(s):
+        return {
+            "required": {
+                "image": ("IMAGE", ),
+                "mode": (["padding", "face_crop", "none"], ), 
+            }
+        }
+    
+    RETURN_TYPES = ("IMAGE",)
+    FUNCTION = "preprocess"
+    CATEGORY = "image/preprocessors"
+
+    def preprocess(self, image, mode):
+        if mode == "padding":
+            image = pad_to_square(image) 
+        elif mode == "face_crop":
+            image = face_crop(image)
+        
+        return (image,)
         
 NODE_CLASS_MAPPINGS = {
-    "IPAdapter": IPAdapter
+    "IPAdapter": IPAdapter,
+    "ImageCrop": ImageCrop,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
     "IPAdapter": "Load IPAdapter",
+    "ImageCrop": "furusu Image Crop",
 }
+
