@@ -8,6 +8,8 @@
 2. `IPAdapter-ComfyUI/models`に[ip-adapterのチェックポイント](https://huggingface.co/h94/IP-Adapter/blob/main/models/ip-adapter_sd15.bin)を入れる。
 3. `ComfyUI/models/clip_vision`に[clip vision model](https://huggingface.co/h94/IP-Adapter/blob/main/models/image_encoder/pytorch_model.bin)を入れる。
 
+※Windowsだと[これ](https://github.com/nagadomi/lbpcascade_animeface/blob/master/lbpcascade_animeface.xml)をあらかじめリポジトリ直下にダウンロードしておかないとエラーが起きるかも。
+
 # Usage
 わーくふろぉ貼ってます。
 
