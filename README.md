@@ -5,8 +5,8 @@
 **pytorch >= 2.0.0が必要です。**
 
 1. custom_nodesにくろーん
-2. `IPAdapter-ComfyUI/models`に[ip-adapterのチェックポイント](https://huggingface.co/h94/IP-Adapter/blob/main/models/ip-adapter_sd15.bin)を入れる。
-3. `ComfyUI/models/clip_vision`に[clip vision model](https://huggingface.co/h94/IP-Adapter/blob/main/models/image_encoder/pytorch_model.bin)を入れる。
+2. `IPAdapter-ComfyUI/models`に[SDv1.5用モデル](https://huggingface.co/h94/IP-Adapter/blob/main/models/ip-adapter_sd15.bin)もしく[SDXL用モデル](https://huggingface.co/h94/IP-Adapter/blob/main/sdxl_models/ip-adapter_sdxl.bin)を入れる。
+3. `ComfyUI/models/clip_vision`に[SDv1.5用モデル](https://huggingface.co/h94/IP-Adapter/blob/main/models/image_encoder/pytorch_model.bin)もしくは[SDXL用モデル](https://huggingface.co/h94/IP-Adapter/blob/main/sdxl_models/image_encoder/pytorch_model.bin)を入れる。
 
 ※Windowsだと[これ](https://github.com/nagadomi/lbpcascade_animeface/blob/master/lbpcascade_animeface.xml)をあらかじめリポジトリ直下にダウンロードしておかないとエラーが起きるかも。
 
