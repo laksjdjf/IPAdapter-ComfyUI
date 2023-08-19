@@ -9,7 +9,10 @@ DETECTOR_FILE = "lbpcascade_animeface.xml"
 
 if not os.path.exists(os.path.join(CURRENT_DIR, DETECTOR_FILE)):
     print("Downloading anime face detector...")
-    subprocess.run(["wget", "https://raw.githubusercontent.com/nagadomi/lbpcascade_animeface/master/lbpcascade_animeface.xml", "-P", CURRENT_DIR])
+    try:
+        subprocess.run(["wget", "https://raw.githubusercontent.com/nagadomi/lbpcascade_animeface/master/lbpcascade_animeface.xml", "-P", CURRENT_DIR])
+    except:
+        print("Failed to download lbpcascade_animeface.xml so please download it yourself.")
 
 def image_to_numpy(image):
     image = image.squeeze(0) * 255

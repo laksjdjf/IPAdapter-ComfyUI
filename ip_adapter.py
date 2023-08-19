@@ -45,7 +45,7 @@ class To_KV(torch.nn.Module):
         for i, key in enumerate(state_dict.keys()):
             self.to_kvs[i].weight.data = state_dict[key]
     
-class IPAdapterModel:
+class IPAdapterModel(torch.nn.Module):
     def __init__(self, ip_ckpt, clip_embeddings_dim):
         super().__init__()
         self.device = "cuda"
@@ -56,7 +56,7 @@ class IPAdapterModel:
             cross_attention_dim=self.cross_attention_dim,
             clip_embeddings_dim=clip_embeddings_dim,
             clip_extra_context_tokens=self.clip_extra_context_tokens
-        ).to("cuda", dtype=torch.float16)
+        )
         
         self.load_ip_adapter(state_dict)
 
@@ -64,7 +64,6 @@ class IPAdapterModel:
         self.image_proj_model.load_state_dict(state_dict["image_proj"])
         self.ip_layers = To_KV(self.cross_attention_dim)
         self.ip_layers.load_state_dict(state_dict["ip_adapter"])
-        self.ip_layers.to("cuda")
         
     @torch.inference_mode()
     def get_image_embeds(self, clip_image_embeds):
@@ -86,6 +85,7 @@ class IPAdapter:
                     "step": 0.05 #Slider's step
                 }),
                 "model_name": (get_file_list(os.path.join(CURRENT_DIR,"models")), ),
+                "dtype": (["fp16", "fp32"], ),
             }
         }
     
@@ -93,12 +93,12 @@ class IPAdapter:
     FUNCTION = "adapter"
     CATEGORY = "loaders"
 
-    def adapter(self, model, clip_vision_output, weight, model_name):
-        dtype = model.model.diffusion_model.dtype
+    def adapter(self, model, clip_vision_output, weight, model_name, dtype):
+        self.dtype = torch.float32 if dtype == "fp32" else torch.float16
         device = "cuda"
         self.weight = weight
         
-        clip_vision_emb = clip_vision_output.image_embeds.to(device, dtype=torch.float16)
+        clip_vision_emb = clip_vision_output.image_embeds.to(device, dtype=self.dtype)
         clip_embeddings_dim = clip_vision_emb.shape[1]
 
         self.sdxl = clip_embeddings_dim == 1280 # 本当か？
@@ -107,11 +107,12 @@ class IPAdapter:
             os.path.join(CURRENT_DIR, os.path.join(CURRENT_DIR, "models", model_name)),
             clip_embeddings_dim = clip_embeddings_dim
         )
-        self.ipadapter.ip_layers.to(device, dtype=dtype)
+
+        self.ipadapter.to(device, dtype=self.dtype)
 
         self.image_emb, self.uncond_image_emb = self.ipadapter.get_image_embeds(clip_vision_emb)
-        self.image_emb = self.image_emb.to(device, dtype=dtype)
-        self.uncond_image_emb = self.uncond_image_emb.to(device, dtype=dtype)
+        self.image_emb = self.image_emb.to(device, dtype=self.dtype)
+        self.uncond_image_emb = self.uncond_image_emb.to(device, dtype=self.dtype)
         self.cond_uncond_image_emb = None
         
         new_model = model.clone()
@@ -144,31 +145,33 @@ class IPAdapter:
     
     def patch_forward(self, number):
         def forward(n, context_attn2, value_attn2, extra_options):
-            q = n
-            k = context_attn2
-            v = value_attn2
-            b, _, _ = q.shape
+            org_dtype = n.dtype
+            with torch.autocast("cuda", dtype=self.dtype):
+                q = n
+                k = context_attn2
+                v = value_attn2
+                b, _, _ = q.shape
 
-            if self.cond_uncond_image_emb is None or self.cond_uncond_image_emb.shape[0] != b:
-                self.cond_uncond_image_emb = torch.cat([self.uncond_image_emb.repeat(b//2, 1, 1), self.image_emb.repeat(b//2, 1, 1)], dim=0)
+                if self.cond_uncond_image_emb is None or self.cond_uncond_image_emb.shape[0] != b:
+                    self.cond_uncond_image_emb = torch.cat([self.uncond_image_emb.repeat(b//2, 1, 1), self.image_emb.repeat(b//2, 1, 1)], dim=0)
 
-            ip_k = self.ipadapter.ip_layers.to_kvs[number*2](self.cond_uncond_image_emb)
-            ip_v = self.ipadapter.ip_layers.to_kvs[number*2+1](self.cond_uncond_image_emb)
+                ip_k = self.ipadapter.ip_layers.to_kvs[number*2](self.cond_uncond_image_emb)
+                ip_v = self.ipadapter.ip_layers.to_kvs[number*2+1](self.cond_uncond_image_emb)
 
-            q, k, v, ip_k, ip_v = map(
-                lambda t: t.view(b, -1, extra_options["n_heads"], extra_options["dim_head"]).transpose(1, 2),
-                (q, k, v, ip_k, ip_v),
-            )
+                q, k, v, ip_k, ip_v = map(
+                    lambda t: t.view(b, -1, extra_options["n_heads"], extra_options["dim_head"]).transpose(1, 2),
+                    (q, k, v, ip_k, ip_v),
+                )
 
-            out = torch.nn.functional.scaled_dot_product_attention(q, k, v, attn_mask=None, dropout_p=0.0, is_causal=False)
-            out = out.transpose(1, 2).reshape(b, -1, extra_options["n_heads"] * extra_options["dim_head"])
+                out = torch.nn.functional.scaled_dot_product_attention(q, k, v, attn_mask=None, dropout_p=0.0, is_causal=False)
+                out = out.transpose(1, 2).reshape(b, -1, extra_options["n_heads"] * extra_options["dim_head"])
 
-            ip_out = torch.nn.functional.scaled_dot_product_attention(q, ip_k, ip_v, attn_mask=None, dropout_p=0.0, is_causal=False)
-            ip_out = ip_out.transpose(1, 2).reshape(b, -1, extra_options["n_heads"] * extra_options["dim_head"])
+                ip_out = torch.nn.functional.scaled_dot_product_attention(q, ip_k, ip_v, attn_mask=None, dropout_p=0.0, is_causal=False)
+                ip_out = ip_out.transpose(1, 2).reshape(b, -1, extra_options["n_heads"] * extra_options["dim_head"])
 
-            out = out + ip_out * self.weight
+                out = out + ip_out * self.weight
 
-            return out
+            return out.to(dtype=org_dtype)
 
         return forward
     
