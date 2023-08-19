@@ -1,6 +1,9 @@
 # IPAdapter-ComfyUI
 [IP-Adapter](https://github.com/tencent-ailab/IP-Adapter)の実験的な実装です。とりあえず動けばいいという思想で実装しているので問題いっぱいありそうです。
 
+2023/08/19:
+
+**As there have been many reports of black images being generated, the ability to specify the type at inference has been implemented. I don't know if this solves the problem, though, as I'm not experiencing it.**
 # Install
 **pytorch >= 2.0.0が必要です。**
 
