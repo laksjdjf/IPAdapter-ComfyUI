@@ -1,8 +1,13 @@
 import torch
 import torch.nn.functional as F
 import os
-import cv2
 import subprocess
+
+CV2_AVAILABLE = True
+try:
+    import cv2
+except:
+    CV2_AVAILABLE = False
 
 CURRENT_DIR = os.path.dirname(os.path.realpath(__file__))
 DETECTOR_FILE = "lbpcascade_animeface.xml"
@@ -13,6 +18,7 @@ if not os.path.exists(os.path.join(CURRENT_DIR, DETECTOR_FILE)):
         subprocess.run(["wget", "https://raw.githubusercontent.com/nagadomi/lbpcascade_animeface/master/lbpcascade_animeface.xml", "-P", CURRENT_DIR])
     except:
         print("Failed to download lbpcascade_animeface.xml so please download it yourself.")
+        CV2_AVAILABLE = False
 
 def image_to_numpy(image):
     image = image.squeeze(0) * 255
