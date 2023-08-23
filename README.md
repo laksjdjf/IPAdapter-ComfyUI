@@ -1,9 +1,15 @@
 # IPAdapter-ComfyUI
 [IP-Adapter](https://github.com/tencent-ailab/IP-Adapter)の実験的な実装です。とりあえず動けばいいという思想で実装しているので問題いっぱいありそうです。
 
+2023/08/23:
+
+The implementation of the [Plus model](https://huggingface.co/h94/IP-Adapter/blob/main/models/ip-adapter-plus_sd15.bin) is being tested in the ```plus``` branch.
+
+**Node specifications will be changed to match plus.**
+
 2023/08/19:
 
-**As there have been many reports of black images being generated, the ability to specify the type at inference has been implemented. I don't know if this solves the problem, though, as I'm not experiencing it.**
+As there have been many reports of black images being generated, the ability to specify the type at inference has been implemented. I don't know if this solves the problem, though, as I'm not experiencing it.
 # Install
 **pytorch >= 2.0.0が必要です。**
 
