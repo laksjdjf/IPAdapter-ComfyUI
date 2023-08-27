@@ -26,6 +26,11 @@ plusモデルの仕様のため、ノードの仕様を変更しました。ま�
 + **MODEL**：KSampler等につなげてください。
 + **CLIP_VISION_OUTPUT**：ふつうは気にしなくていいです。Revision等を使うときに無駄な計算を省くことができます。
 
+## Multiple condition.
+ノードを自然につなげることで、複数画像を入力することができます。Maskと組み合わせることで、左右で条件付けを分けるみたいなこともできます。
+![image](https://github.com/laksjdjf/IPAdapter-ComfyUI/assets/22386664/c2282aee-ab98-488d-936e-1787994e957f)
+背景も分割されてしまうことが問題ですね＾＾；
+
 # Hint
 + 入力画像は自動で中央切り抜きによって正方形にされるので、避けたい場合は予め切り取り処理をするか、`preprocess/furusu Image crop`を使うとよいかもしれません。`preprocess/furusu Image crop`にはパディングをする`padding`とキャラの顔位置を基準に切り取りをする`face_crop`があります。`face_crop`に必要な[lbpcascade_animeface.xml](https://github.com/nagadomi/lbpcascade_animefacehttps://github.com/nagadomi/lbpcascade_animeface)は自動ダウンロードできない場合があるので、その場合は手動でリポジトリ直下に入れてください。
 
