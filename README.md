@@ -1,30 +1,30 @@
 # IPAdapter-ComfyUI
-[IP-Adapter](https://github.com/tencent-ailab/IP-Adapter)の実験的な実装です。とりあえず動けばいいという思想で実装しているので問題いっぱいありそうです。
+[IP-Adapter](https://github.com/tencent-ailab/IP-Adapter)の[ComfyUI](https://github.com/comfyanonymous/ComfyUI)カスタムノードです。
 
-2023/08/23:
+2023/08/27:
+plusモデルの仕様のため、ノードの仕様を変更しました。また複数画像やマスクによる領域指定に対応しました。
 
-The implementation of the [Plus model](https://huggingface.co/h94/IP-Adapter/blob/main/models/ip-adapter-plus_sd15.bin) is being tested in the ```plus``` branch.
-
-**Node specifications will be changed to match plus.**
-
-2023/08/19:
-
-As there have been many reports of black images being generated, the ability to specify the type at inference has been implemented. I don't know if this solves the problem, though, as I'm not experiencing it.
 # Install
-**pytorch >= 2.0.0が必要です。**
 
-1. custom_nodesにくろーん
-2. `IPAdapter-ComfyUI/models`に[SDv1.5用モデル](https://huggingface.co/h94/IP-Adapter/blob/main/models/ip-adapter_sd15.bin)もしく[SDXL用モデル](https://huggingface.co/h94/IP-Adapter/blob/main/sdxl_models/ip-adapter_sdxl.bin)を入れる。
-3. `ComfyUI/models/clip_vision`に[SDv1.5用モデル](https://huggingface.co/h94/IP-Adapter/blob/main/models/image_encoder/pytorch_model.bin)もしくは[SDXL用モデル](https://huggingface.co/h94/IP-Adapter/blob/main/sdxl_models/image_encoder/pytorch_model.bin)を入れる。
-
-※Windowsだと[これ](https://github.com/nagadomi/lbpcascade_animeface/blob/master/lbpcascade_animeface.xml)をあらかじめリポジトリ直下にダウンロードしておかないとエラーが起きるかも。
+1. custom_nodesにclone
+2. `IPAdapter-ComfyUI/models`にip-adapterのモデル（例：[SDv1.5用モデル](https://huggingface.co/h94/IP-Adapter/blob/main/models/ip-adapter_sd15.bin))を入れる。
+3. `ComfyUI/models/clip_vision`にCLIP_visionモデル（例：[SDv1.5用モデル](https://huggingface.co/h94/IP-Adapter/blob/main/models/image_encoder/pytorch_model.bin))を入れる。
 
 # Usage
-わーくふろぉ貼ってます。
+`ip-adapter.json`を参照してください。
+
+## Input
++ **model**：modelをつなげてください。LoRALoaderなどとつなげる順番の違いについては影響ありません。
++ **image**：画像をつなげてください。
++ **clip_vision**：`Load CLIP Vision`の出力とつなげてください。
++ **mask**：任意です。マスクをつなげると適用領域を制限できます。必ず生成画像と同じ解像度にしてください。
+
+## Output
++ **MODEL**：KSampler等につなげてください。
++ **CLIP_VISION_OUTPUT**：ふつうは気にしなくていいです。Revision等を使うときに無駄な計算を省くことができます。
 
 # Hint
-+ clip vision modelは長方形画像を中央切り抜きするっぽいので、あらかじめ自分で切り抜きした方がいいっぽいかもしれないっぽい。
-⇒`image/preprocessor`に切り抜き用のノードを追加しました。paddingや検出した顔を基準にした切り抜きを自動でできるようにしています。
++ 入力画像は自動で中央切り抜きによって正方形にされるので、避けたい場合は予め切り取り処理をするか、`preprocess/furusu Image crop`を使うとよいかもしれません。`preprocess/furusu Image crop`にはパディングをする`padding`とキャラの顔位置を基準に切り取りをする`face_crop`があります。`face_crop`に必要な[lbpcascade_animeface.xml](https://github.com/nagadomi/lbpcascade_animefacehttps://github.com/nagadomi/lbpcascade_animeface)は自動ダウンロードできない場合があるので、その場合は手動でリポジトリ直下に入れてください。
 
 # CITIATION
 ```
