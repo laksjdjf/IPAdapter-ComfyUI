@@ -1,6 +1,9 @@
 import torch
+import torch.nn.functional as F
 import os
 from .image_preprocessor import pad_to_square, face_crop, CV2_AVAILABLE
+from .resampler import Resampler
+from einops import rearrange
 
 CURRENT_DIR = os.path.dirname(os.path.realpath(__file__))
 CROP_MODES = ["padding", "face_crop", "none"] if CV2_AVAILABLE else ["padding", "none"]
@@ -12,15 +15,35 @@ SD_XL_CHANNELS = [640] * 8 + [1280] * 40 + [1280] * 60 + [640] * 12 + [1280] * 2
 def get_file_list(path):
     return [file for file in os.listdir(path) if file != "put_models_here.txt"]
 
-# from https://github.com/comfyanonymous/ComfyUI/blob/master/comfy/sd.py and add index
-def set_model_patch_replace(model, patch, block_name, number, index):
-    name = "attn2"
+def set_model_patch_replace(model, patch_kwargs, key):
     to = model.model_options["transformer_options"]
     if "patches_replace" not in to:
         to["patches_replace"] = {}
-    if name not in to["patches_replace"]:
-        to["patches_replace"][name] = {}
-    to["patches_replace"][name][(block_name, number, index)] = patch
+    if "attn2" not in to["patches_replace"]:
+        to["patches_replace"]["attn2"] = {}
+    if key not in to["patches_replace"]["attn2"]:
+        patch = CrossAttentionPatch(**patch_kwargs)
+        to["patches_replace"]["attn2"][key] = patch
+    else:
+        to["patches_replace"]["attn2"][key].set_new_condition(**patch_kwargs)
+
+def attention(q, k, v, extra_options):
+    if not hasattr(F, "multi_head_attention_forward"):
+        q, k, v = map(lambda t: rearrange(t, 'b n (h d) -> (b h) n d', h=extra_options["n_heads"]), (q, k, v))
+        sim = torch.einsum('b i d, b j d -> b i j', q, k) * (extra_options["dim_head"] ** -0.5)
+        sim = F.softmax(sim, dim=-1)
+        out = torch.einsum('b i j, b j d -> b i d', sim, v)
+        out = rearrange(out, '(b h) n d -> b n (h d)', h=extra_options["n_heads"])
+    else:
+        b, _, _ = q.shape
+        q, k, v = map(
+            lambda t: t.view(b, -1, extra_options["n_heads"], extra_options["dim_head"]).transpose(1, 2),
+            (q, k, v),
+        )
+        out = F.scaled_dot_product_attention(q, k, v, attn_mask=None, dropout_p=0.0, is_causal=False)
+        out = out.transpose(1, 2).reshape(b, -1, extra_options["n_heads"] * extra_options["dim_head"])
+    return out
+
 
 class ImageProjModel(torch.nn.Module):
     """Projection Model"""
@@ -52,41 +75,38 @@ class To_KV(torch.nn.Module):
             self.to_kvs[i].weight.data = state_dict[key]
     
 class IPAdapterModel(torch.nn.Module):
-    def __init__(self, ip_ckpt, clip_embeddings_dim):
+    def __init__(self, state_dict, plus, cross_attention_dim=768, clip_embeddings_dim=1024, clip_extra_context_tokens=4):
         super().__init__()
         self.device = "cuda"
-        state_dict = torch.load(ip_ckpt, map_location="cpu")
+        self.plus = plus
+        if self.plus:
+            self.image_proj_model = Resampler(
+                dim=cross_attention_dim,
+                depth=4,
+                dim_head=64,
+                heads=12,
+                num_queries=clip_extra_context_tokens,
+                embedding_dim=clip_embeddings_dim,
+                output_dim=cross_attention_dim,
+                ff_mult=4
+            )   
+        else:
+            self.image_proj_model = ImageProjModel(
+                cross_attention_dim=cross_attention_dim,
+                clip_embeddings_dim=clip_embeddings_dim,
+                clip_extra_context_tokens=clip_extra_context_tokens
+            )
         
-        # cross_attention_dim is equal to text_encoder output
-        self.cross_attention_dim = state_dict["ip_adapter"]["1.to_k_ip.weight"].shape[1]
-        
-        # number of tokens of ip_adapter embedding
-        self.clip_extra_context_tokens = state_dict["image_proj"]["proj.weight"].shape[0] // self.cross_attention_dim
-        
-        self.image_proj_model = ImageProjModel(
-            cross_attention_dim=self.cross_attention_dim,
-            clip_embeddings_dim=clip_embeddings_dim,
-            clip_extra_context_tokens=self.clip_extra_context_tokens
-        )
-        
-        self.load_ip_adapter(state_dict)
-
-    def load_ip_adapter(self, state_dict):
         self.image_proj_model.load_state_dict(state_dict["image_proj"])
-        self.ip_layers = To_KV(self.cross_attention_dim)
+        self.ip_layers = To_KV(cross_attention_dim)
         self.ip_layers.load_state_dict(state_dict["ip_adapter"])
         
     @torch.inference_mode()
-    def get_image_embeds(self, clip_image_embeds):
-        '''
-        clip_image_embeds: clip_vision_output, size: batch_size, 1024(sdv1-2) or 1280(sdxl)
-        return: cond, uncond for CFG, size: batch_size, num_tokens, 768(sdv1) or 1024(sdv2) or 2048(sdxl)
-        '''
-
-        image_prompt_embeds = self.image_proj_model(clip_image_embeds)
-        # input zero vector for unconditional.
-        uncond_image_prompt_embeds = self.image_proj_model(torch.zeros_like(clip_image_embeds))
+    def get_image_embeds(self, cond, uncond):
+        image_prompt_embeds = self.image_proj_model(cond)
+        uncond_image_prompt_embeds = self.image_proj_model(uncond)
         return image_prompt_embeds, uncond_image_prompt_embeds
+    
 
 class IPAdapter:
     @classmethod
@@ -94,7 +114,8 @@ class IPAdapter:
         return {
             "required": {
                 "model": ("MODEL", ),
-                "clip_vision_output": ("CLIP_VISION_OUTPUT", ),
+                "image": ("IMAGE", ),
+                "clip_vision": ("CLIP_VISION", ),
                 "weight": ("FLOAT", {
                     "default": 1, 
                     "min": -1, #Minimum value
@@ -103,32 +124,50 @@ class IPAdapter:
                 }),
                 "model_name": (get_file_list(os.path.join(CURRENT_DIR,"models")), ),
                 "dtype": (["fp16", "fp32"], ),
+            },
+            "optional": {
+                "mask": ("MASK",),
             }
         }
     
-    RETURN_TYPES = ("MODEL",)
+    RETURN_TYPES = ("MODEL", "CLIP_VISION_OUTPUT")
     FUNCTION = "adapter"
     CATEGORY = "loaders"
 
-    def adapter(self, model, clip_vision_output, weight, model_name, dtype):
+    def adapter(self, model, image, clip_vision, weight, model_name, dtype, mask=None):
         self.dtype = torch.float32 if dtype == "fp32" else torch.float16
         device = "cuda"
         self.weight = weight # ip_adapter scale
-        
-        clip_vision_emb = clip_vision_output.image_embeds.to(device, dtype=self.dtype)
-        clip_embeddings_dim = clip_vision_emb.shape[1]
 
-        # sd_v1-2: 1024, sd_xl: 1280 at the moment...
-        self.sdxl = clip_embeddings_dim == 1280
+        ip_state_dict = torch.load(os.path.join(CURRENT_DIR, os.path.join(CURRENT_DIR, "models", model_name)), map_location="cpu")
+        self.plus = "latents" in ip_state_dict["image_proj"]
+
+        # cross_attention_dim is equal to text_encoder output
+        self.cross_attention_dim = ip_state_dict["ip_adapter"]["1.to_k_ip.weight"].shape[1]
+
+        # number of tokens of ip_adapter embedding
+        if self.plus:
+            self.clip_extra_context_tokens = ip_state_dict["image_proj"]["latents"].shape[1]
+        else:
+            self.clip_extra_context_tokens = ip_state_dict["image_proj"]["proj.weight"].shape[0] // self.cross_attention_dim            
+
+        cond, uncond, outputs = self.clip_vision_encode(clip_vision, image, self.plus)
+        self.clip_embeddings_dim = cond.shape[-1]
+
+        # sd_v1-2: 1024, sd_xl: 2048
+        self.sdxl = self.cross_attention_dim == 2048
         
         self.ipadapter = IPAdapterModel(
-            os.path.join(CURRENT_DIR, os.path.join(CURRENT_DIR, "models", model_name)),
-            clip_embeddings_dim = clip_embeddings_dim
+            ip_state_dict,
+            plus = self.plus,
+            cross_attention_dim = self.cross_attention_dim,
+            clip_embeddings_dim = self.clip_embeddings_dim,
+            clip_extra_context_tokens = self.clip_extra_context_tokens
         )
 
         self.ipadapter.to(device, dtype=self.dtype)
 
-        self.image_emb, self.uncond_image_emb = self.ipadapter.get_image_embeds(clip_vision_emb)
+        self.image_emb, self.uncond_image_emb = self.ipadapter.get_image_embeds(cond.to(device, dtype=self.dtype), uncond.to(device, dtype=self.dtype))
         self.image_emb = self.image_emb.to(device, dtype=self.dtype)
         self.uncond_image_emb = self.uncond_image_emb.to(device, dtype=self.dtype)
         # Not sure of batch size at this point.
@@ -140,67 +179,103 @@ class IPAdapter:
         patch_name of sdv1-2: ("input" or "output" or "middle", block_id)
         patch_name of sdxl: ("input" or "output" or "middle", block_id, transformer_index)
         '''
+        patch_kwargs = {
+            "number": 0,
+            "weight": self.weight,
+            "ipadapter": self.ipadapter,
+            "dtype": self.dtype,
+            "cond": self.image_emb,
+            "uncond": self.uncond_image_emb,
+            "mask": mask if mask is None else mask.to(device)
+        }
+
         if not self.sdxl:
-            number = 0 # index of to_kvs
             for id in [1,2,4,5,7,8]: # id of input_blocks that have cross attention
-                new_model.set_model_attn2_replace(self.patch_forward(number), "input", id)
-                number += 1
+                set_model_patch_replace(new_model, patch_kwargs, ("input", id))
+                patch_kwargs["number"] += 1
             for id in [3,4,5,6,7,8,9,10,11]: # id of output_blocks that have cross attention
-                new_model.set_model_attn2_replace(self.patch_forward(number), "output", id)
-                number += 1
-            new_model.set_model_attn2_replace(self.patch_forward(number), "middle", 0)
+                set_model_patch_replace(new_model, patch_kwargs, ("output", id))
+                patch_kwargs["number"] += 1
+            set_model_patch_replace(new_model, patch_kwargs, ("middle", 0))
         else:
-            number = 0
             for id in [4,5,7,8]: # id of input_blocks that have cross attention
                 block_indices = range(2) if id in [4, 5] else range(10) # transformer_depth
                 for index in block_indices:
-                    set_model_patch_replace(new_model, self.patch_forward(number), "input", id, index)
-                    number += 1
+                    set_model_patch_replace(new_model, patch_kwargs, ("input", id, index))
+                    patch_kwargs["number"] += 1
             for id in range(6): # id of output_blocks that have cross attention
                 block_indices = range(2) if id in [3, 4, 5] else range(10) # transformer_depth
                 for index in block_indices:
-                    set_model_patch_replace(new_model, self.patch_forward(number), "output", id, index)
-                    number += 1
+                    set_model_patch_replace(new_model, patch_kwargs, ("output", id, index))
+                    patch_kwargs["number"] += 1
             for index in range(10):
-                set_model_patch_replace(new_model, self.patch_forward(number), "middle", 0, index)
-                number += 1
+                set_model_patch_replace(new_model, patch_kwargs, ("middle", 0, index))
+                patch_kwargs["number"] += 1
 
-        return (new_model,)
+        return (new_model, outputs)
     
-    # forward for patching
-    def patch_forward(self, number):
-        def forward(n, context_attn2, value_attn2, extra_options):
-            org_dtype = n.dtype
-            with torch.autocast("cuda", dtype=self.dtype):
-                q = n
-                k = context_attn2
-                v = value_attn2
-                b, _, _ = q.shape
+    def clip_vision_encode(self, clip_vision, image, plus=False):
+        image = torch.clip((255. * image), 0, 255).round().int()
+        image = list(map(lambda a: a, image))
+        image = clip_vision.processor(images=image, return_tensors="pt").pixel_values
+        outputs = clip_vision.model(image, output_hidden_states=True)
+        if plus:
+            cond = outputs.hidden_states[-2]
+            uncond = clip_vision.model(torch.zeros_like(image), output_hidden_states=True).hidden_states[-2]
+        else:
+            cond = outputs.image_embeds
+            uncond = torch.zeros_like(cond)
+        return cond, uncond, outputs
 
-                if self.cond_uncond_image_emb is None or self.cond_uncond_image_emb.shape[0] != b:
-                    self.cond_uncond_image_emb = torch.cat([self.uncond_image_emb.repeat(b//2, 1, 1), self.image_emb.repeat(b//2, 1, 1)], dim=0)
+
+class CrossAttentionPatch:
+    # forward for patching
+    def __init__(self, weight, ipadapter, dtype, number, cond, uncond, mask=None):
+        self.weights = [weight]
+        self.ipadapters = [ipadapter]
+        self.conds = [cond]
+        self.unconds = [uncond]
+        self.dtype = dtype
+        self.number = number
+        self.masks = [mask]
+    
+    def set_new_condition(self, weight, ipadapter, cond, uncond, dtype, number, mask=None):
+        self.weights.append(weight)
+        self.ipadapters.append(ipadapter)
+        self.conds.append(cond)
+        self.unconds.append(uncond)
+        self.masks.append(mask)
+        self.dtype = dtype
+
+    def __call__(self, n, context_attn2, value_attn2, extra_options):
+        org_dtype = n.dtype
+        with torch.autocast("cuda", dtype=self.dtype):
+            q = n
+            k = context_attn2
+            v = value_attn2
+            b, _, _ = q.shape
+
+            out = attention(q, k, v, extra_options)
+
+            for weight, cond, uncond, ipadapter, mask in zip(self.weights, self.conds, self.unconds, self.ipadapters, self.masks):
+                uncond_cond = torch.cat([uncond.repeat(b//2, 1, 1), cond.repeat(b//2, 1, 1)], dim=0)
 
                 # k, v for ip_adapter
-                ip_k = self.ipadapter.ip_layers.to_kvs[number*2](self.cond_uncond_image_emb)
-                ip_v = self.ipadapter.ip_layers.to_kvs[number*2+1](self.cond_uncond_image_emb)
+                ip_k = ipadapter.ip_layers.to_kvs[self.number*2](uncond_cond)
+                ip_v = ipadapter.ip_layers.to_kvs[self.number*2+1](uncond_cond)
 
-                q, k, v, ip_k, ip_v = map(
-                    lambda t: t.view(b, -1, extra_options["n_heads"], extra_options["dim_head"]).transpose(1, 2),
-                    (q, k, v, ip_k, ip_v),
-                )
+                ip_out = attention(q, ip_k, ip_v, extra_options)
+                
+                if mask is not None:
+                    mask_size = mask.shape[0] * mask.shape[1]
+                    down_sample_rate = int((mask_size // 64 // out.shape[1]) ** (1/2))
+                    mask_downsample = torch.nn.functional.interpolate(mask.unsqueeze(0).unsqueeze(0), scale_factor= 1/8/down_sample_rate, mode="nearest").squeeze(0)
+                    mask_downsample = mask_downsample.view(1,-1, 1).repeat(out.shape[0], 1, out.shape[2])
+                    ip_out = ip_out * mask_downsample
 
-                out = torch.nn.functional.scaled_dot_product_attention(q, k, v, attn_mask=None, dropout_p=0.0, is_causal=False)
-                out = out.transpose(1, 2).reshape(b, -1, extra_options["n_heads"] * extra_options["dim_head"])
+                out = out + ip_out * weight
 
-                # output of ip_adapter
-                ip_out = torch.nn.functional.scaled_dot_product_attention(q, ip_k, ip_v, attn_mask=None, dropout_p=0.0, is_causal=False)
-                ip_out = ip_out.transpose(1, 2).reshape(b, -1, extra_options["n_heads"] * extra_options["dim_head"])
-
-                out = out + ip_out * self.weight
-
-            return out.to(dtype=org_dtype)
-
-        return forward
+        return out.to(dtype=org_dtype)
     
 class ImageCrop:
     @classmethod
