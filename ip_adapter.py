@@ -4,6 +4,9 @@ import os
 from .image_preprocessor import pad_to_square, face_crop, CV2_AVAILABLE
 from .resampler import Resampler
 from einops import rearrange
+import contextlib
+import comfy.model_management
+
 
 CURRENT_DIR = os.path.dirname(os.path.realpath(__file__))
 CROP_MODES = ["padding", "face_crop", "none"] if CV2_AVAILABLE else ["padding", "none"]
@@ -215,16 +218,33 @@ class IPAdapter:
         return (new_model, outputs)
     
     def clip_vision_encode(self, clip_vision, image, plus=False):
-        image = torch.clip((255. * image), 0, 255).round().int()
-        image = list(map(lambda a: a, image))
-        image = clip_vision.processor(images=image, return_tensors="pt").pixel_values
-        outputs = clip_vision.model(image, output_hidden_states=True)
+        img = torch.clip((255. * image), 0, 255).round().int()
+        img = list(map(lambda a: a, img))
+        inputs = clip_vision.processor(images=img, return_tensors="pt")
+        comfy.model_management.load_model_gpu(clip_vision.patcher)
+        pixel_values = inputs['pixel_values'].to(clip_vision.load_device)
+
+        if clip_vision.dtype != torch.float32:
+            precision_scope = torch.autocast
+        else:
+            precision_scope = lambda a, b: contextlib.nullcontext(a)
+
+        with precision_scope(comfy.model_management.get_autocast_device(clip_vision.load_device), torch.float32):
+            outputs = clip_vision.model(pixel_values=pixel_values, output_hidden_states=True)
+
         if plus:
             cond = outputs.hidden_states[-2]
-            uncond = clip_vision.model(torch.zeros_like(image), output_hidden_states=True).hidden_states[-2]
+            with precision_scope(comfy.model_management.get_autocast_device(clip_vision.load_device), torch.float32):
+                uncond = clip_vision.model(torch.zeros_like(pixel_values), output_hidden_states=True).hidden_states[-2]
         else:
             cond = outputs.image_embeds
             uncond = torch.zeros_like(cond)
+        for k in outputs:
+            t = outputs[k]
+            if k == "hidden_states":
+                outputs[k] = None
+            elif t is not None:
+                outputs[k] = t.cpu()
         return cond, uncond, outputs
 
 
