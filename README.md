@@ -37,6 +37,10 @@ plusモデルの仕様のため、ノードの仕様を変更しました。ま�
 # Bug
 + `Apply ControlNet`はなぜかバグるので、代わりに`Apply ControlNet(Advanced)`を使ってください。
 
+# Models
++ official models:https://huggingface.co/h94/IP-Adapter
++ my models:https:https://huggingface.co/furusu/IP-Adapter
+
 # CITIATION
 ```
 @article{ye2023ip-adapter,
