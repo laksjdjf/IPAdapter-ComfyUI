@@ -42,11 +42,4 @@ plusモデルの仕様のため、ノードの仕様を変更しました。ま�
 + my models:https:https://huggingface.co/furusu/IP-Adapter
 
 # CITIATION
-```
-@article{ye2023ip-adapter,
-  title={IP-Adapter: Text Compatible Image Prompt Adapter for Text-to-Image Diffusion Models},
-  author={Ye, Hu and Zhang, Jun and Liu, Sibo and Han, Xiao and Yang, Wei},
-  booktitle={arXiv preprint arxiv:2308.06721},
-  year={2023}
-}
-```
+IP-Adapter:https://github.com/tencent-ailab/IP-Adapter
