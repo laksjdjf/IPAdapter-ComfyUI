@@ -35,7 +35,7 @@ plusモデルの仕様のため、ノードの仕様を変更しました。ま�
 + 入力画像は自動で中央切り抜きによって正方形にされるので、避けたい場合は予め切り取り処理をするか、`preprocess/furusu Image crop`を使うとよいかもしれません。`preprocess/furusu Image crop`にはパディングをする`padding`とキャラの顔位置を基準に切り取りをする`face_crop`があります。`face_crop`に必要な[lbpcascade_animeface.xml](https://github.com/nagadomi/lbpcascade_animefacehttps://github.com/nagadomi/lbpcascade_animeface)は自動ダウンロードできない場合があるので、その場合は手動でリポジトリ直下に入れてください。
 
 # Bug
-+ `Apply ControlNet`はなぜかバグるので、代わりに`Apply ControlNet(Advanced)`を使ってください。
++ ~~Apply ControlNetはなぜかバグるので、代わりにApply ControlNet(Advanced)を使ってください。~~ 多分治った。
 
 # Models
 + official models:https://huggingface.co/h94/IP-Adapter
