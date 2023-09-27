@@ -78,15 +78,15 @@ class To_KV(torch.nn.Module):
             self.to_kvs[i].weight.data = state_dict[key]
     
 class IPAdapterModel(torch.nn.Module):
-    def __init__(self, state_dict, plus, cross_attention_dim=768, clip_embeddings_dim=1024, clip_extra_context_tokens=4):
+    def __init__(self, state_dict, plus, cross_attention_dim=768, clip_embeddings_dim=1024, clip_extra_context_tokens=4, sdxl_plus=False):
         super().__init__()
         self.plus = plus
         if self.plus:
             self.image_proj_model = Resampler(
-                dim=cross_attention_dim,
+                dim=1280 if sdxl_plus else cross_attention_dim,
                 depth=4,
                 dim_head=64,
-                heads=12,
+                heads=20 if sdxl_plus else 12,
                 num_queries=clip_extra_context_tokens,
                 embedding_dim=clip_embeddings_dim,
                 output_dim=cross_attention_dim,
@@ -147,6 +147,9 @@ class IPAdapter:
         # cross_attention_dim is equal to text_encoder output
         self.cross_attention_dim = ip_state_dict["ip_adapter"]["1.to_k_ip.weight"].shape[1]
 
+        self.sdxl = self.cross_attention_dim == 2048
+        self.sdxl_plus = self.sdxl and self.plus
+
         # number of tokens of ip_adapter embedding
         if self.plus:
             self.clip_extra_context_tokens = ip_state_dict["image_proj"]["latents"].shape[1]
@@ -155,16 +158,14 @@ class IPAdapter:
 
         cond, uncond, outputs = self.clip_vision_encode(clip_vision, image, self.plus)
         self.clip_embeddings_dim = cond.shape[-1]
-
-        # sd_v1-2: 1024, sd_xl: 2048
-        self.sdxl = self.cross_attention_dim == 2048
         
         self.ipadapter = IPAdapterModel(
             ip_state_dict,
             plus = self.plus,
             cross_attention_dim = self.cross_attention_dim,
             clip_embeddings_dim = self.clip_embeddings_dim,
-            clip_extra_context_tokens = self.clip_extra_context_tokens
+            clip_extra_context_tokens = self.clip_extra_context_tokens,
+            sdxl_plus = self.sdxl_plus
         )
 
         self.ipadapter.to(device, dtype=self.dtype)
