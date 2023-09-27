@@ -80,7 +80,6 @@ class To_KV(torch.nn.Module):
 class IPAdapterModel(torch.nn.Module):
     def __init__(self, state_dict, plus, cross_attention_dim=768, clip_embeddings_dim=1024, clip_extra_context_tokens=4):
         super().__init__()
-        self.device = "cuda"
         self.plus = plus
         if self.plus:
             self.image_proj_model = Resampler(
@@ -138,8 +137,8 @@ class IPAdapter:
     CATEGORY = "loaders"
 
     def adapter(self, model, image, clip_vision, weight, model_name, dtype, mask=None):
-        self.dtype = torch.float32 if dtype == "fp32" else torch.float16
-        device = "cuda"
+        device = comfy.model_management.get_torch_device()
+        self.dtype = torch.float32 if dtype == "fp32" or device.type == "mps" else torch.float16
         self.weight = weight # ip_adapter scale
 
         ip_state_dict = torch.load(os.path.join(CURRENT_DIR, os.path.join(CURRENT_DIR, "models", model_name)), map_location="cpu")
@@ -178,6 +177,11 @@ class IPAdapter:
         
         new_model = model.clone()
 
+        if mask is not None:
+            if mask.dim() == 3:
+                mask = mask[0]
+            mask = mask.to(device)
+
         '''
         patch_name of sdv1-2: ("input" or "output" or "middle", block_id)
         patch_name of sdxl: ("input" or "output" or "middle", block_id, transformer_index)
@@ -189,7 +193,7 @@ class IPAdapter:
             "dtype": self.dtype,
             "cond": self.image_emb,
             "uncond": self.uncond_image_emb,
-            "mask": mask if mask is None else mask.to(device)
+            "mask": mask
         }
 
         if not self.sdxl:
