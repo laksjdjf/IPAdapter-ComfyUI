@@ -1,15 +1,12 @@
 import torch
-import torch.nn.functional as F
 import os
-from .image_preprocessor import pad_to_square, face_crop, CV2_AVAILABLE
 from .resampler import Resampler
-from einops import rearrange
+
 import contextlib
 import comfy.model_management
-import inspect
+from comfy.ldm.modules.attention import optimized_attention
 
 CURRENT_DIR = os.path.dirname(os.path.realpath(__file__))
-CROP_MODES = ["padding", "face_crop", "none"] if CV2_AVAILABLE else ["padding", "none"]
 
 # attention_channels of input, output, middle
 SD_V12_CHANNELS = [320] * 4 + [640] * 4 + [1280] * 4 + [1280] * 6 + [640] * 6 + [320] * 6 + [1280] * 2
@@ -29,24 +26,6 @@ def set_model_patch_replace(model, patch_kwargs, key):
         to["patches_replace"]["attn2"][key] = patch
     else:
         to["patches_replace"]["attn2"][key].set_new_condition(**patch_kwargs)
-
-def attention(q, k, v, extra_options):
-    if not hasattr(F, "multi_head_attention_forward"):
-        q, k, v = map(lambda t: rearrange(t, 'b n (h d) -> (b h) n d', h=extra_options["n_heads"]), (q, k, v))
-        sim = torch.einsum('b i d, b j d -> b i j', q, k) * (extra_options["dim_head"] ** -0.5)
-        sim = F.softmax(sim, dim=-1)
-        out = torch.einsum('b i j, b j d -> b i d', sim, v)
-        out = rearrange(out, '(b h) n d -> b n (h d)', h=extra_options["n_heads"])
-    else:
-        b, _, _ = q.shape
-        q, k, v = map(
-            lambda t: t.view(b, -1, extra_options["n_heads"], extra_options["dim_head"]).transpose(1, 2),
-            (q, k, v),
-        )
-        out = F.scaled_dot_product_attention(q, k, v, attn_mask=None, dropout_p=0.0, is_causal=False)
-        out = out.transpose(1, 2).reshape(b, -1, extra_options["n_heads"] * extra_options["dim_head"])
-    return out
-
 
 class ImageProjModel(torch.nn.Module):
     """Projection Model"""
@@ -179,9 +158,7 @@ class IPAdapter:
         new_model = model.clone()
 
         if mask is not None:
-            if mask.dim() == 3:
-                mask = mask[0]
-            mask = mask.to(device)
+            mask = mask.squeeze().to(device)
 
         '''
         patch_name of sdv1-2: ("input" or "output" or "middle", block_id)
@@ -274,14 +251,15 @@ class CrossAttentionPatch:
 
     def __call__(self, n, context_attn2, value_attn2, extra_options):
         org_dtype = n.dtype
-        cond_or_uncond = inspect.currentframe().f_back.f_locals["transformer_options"]["cond_or_uncond"]
+        cond_or_uncond = extra_options["cond_or_uncond"]
+        original_shape = (extra_options["original_shape"][2], extra_options["original_shape"][3]) 
         with torch.autocast("cuda", dtype=self.dtype):
             q = n
             k = context_attn2
             v = value_attn2
             b, _, _ = q.shape
             batch_prompt = b // len(cond_or_uncond)
-            out = attention(q, k, v, extra_options)
+            out = optimized_attention(q, k, v, extra_options["n_heads"])
 
             for weight, cond, uncond, ipadapter, mask in zip(self.weights, self.conds, self.unconds, self.ipadapters, self.masks):
                 uncond_cond = torch.cat([(cond.repeat(batch_prompt, 1, 1), uncond.repeat(batch_prompt, 1, 1))[i] for i in cond_or_uncond], dim=0)
@@ -290,48 +268,23 @@ class CrossAttentionPatch:
                 ip_k = ipadapter.ip_layers.to_kvs[self.number*2](uncond_cond)
                 ip_v = ipadapter.ip_layers.to_kvs[self.number*2+1](uncond_cond)
 
-                ip_out = attention(q, ip_k, ip_v, extra_options)
+                ip_out = optimized_attention(q, ip_k, ip_v, extra_options["n_heads"])
                 
                 if mask is not None:
-                    mask_size = mask.shape[0] * mask.shape[1]
-                    down_sample_rate = int((mask_size // 64 // out.shape[1]) ** (1/2))
-                    mask_downsample = torch.nn.functional.interpolate(mask.unsqueeze(0).unsqueeze(0), scale_factor= 1/8/down_sample_rate, mode="nearest").squeeze(0)
-                    mask_downsample = mask_downsample.view(1,-1, 1).repeat(out.shape[0], 1, out.shape[2])
+                    # 良い方法募集
+                    if original_shape[0] * original_shape[1] == q.shape[1]:
+                        down_sample_rate = 1
+                    elif (original_shape[0] // 2) * (original_shape[1] // 2) == q.shape[1]:
+                        down_sample_rate = 2
+                    elif (original_shape[0] // 4) * (original_shape[1] // 4) == q.shape[1]:
+                        down_sample_rate = 4
+                    else:
+                        down_sample_rate = 8
+                    mask_downsample = torch.nn.functional.interpolate(mask.unsqueeze(0).unsqueeze(0), size=(original_shape[0] // down_sample_rate, original_shape[1] // down_sample_rate), mode="nearest").squeeze(0)
+                    mask_downsample = mask_downsample.view(1, -1, 1).repeat(out.shape[0], 1, out.shape[2])
                     ip_out = ip_out * mask_downsample
 
                 out = out + ip_out * weight
 
         return out.to(dtype=org_dtype)
-    
-class ImageCrop:
-    @classmethod
-    def INPUT_TYPES(s):
-        return {
-            "required": {
-                "image": ("IMAGE", ),
-                "mode": (CROP_MODES, ), 
-            }
-        }
-    
-    RETURN_TYPES = ("IMAGE",)
-    FUNCTION = "preprocess"
-    CATEGORY = "image/preprocessors"
-
-    def preprocess(self, image, mode):
-        if mode == "padding":
-            image = pad_to_square(image) 
-        elif mode == "face_crop":
-            image = face_crop(image)
-        
-        return (image,)
-        
-NODE_CLASS_MAPPINGS = {
-    "IPAdapter": IPAdapter,
-    "ImageCrop": ImageCrop,
-}
-
-NODE_DISPLAY_NAME_MAPPINGS = {
-    "IPAdapter": "Load IPAdapter",
-    "ImageCrop": "furusu Image Crop",
-}
 

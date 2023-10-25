@@ -7,6 +7,7 @@ CV2_AVAILABLE = True
 try:
     import cv2
 except:
+    print("OpenCV is not installed so face cropping is not available.")
     CV2_AVAILABLE = False
 
 CURRENT_DIR = os.path.dirname(os.path.realpath(__file__))
@@ -17,8 +18,10 @@ if not os.path.exists(os.path.join(CURRENT_DIR, DETECTOR_FILE)):
     try:
         subprocess.run(["wget", "https://raw.githubusercontent.com/nagadomi/lbpcascade_animeface/master/lbpcascade_animeface.xml", "-P", CURRENT_DIR])
     except:
-        print("Failed to download lbpcascade_animeface.xml so please download it yourself.")
+        print(f"Failed to download lbpcascade_animeface.xml so please download it in {CURRENT_DIR}.")
         CV2_AVAILABLE = False
+
+CROP_MODES = ["padding", "face_crop", "none"] if CV2_AVAILABLE else ["padding", "none"]
 
 def image_to_numpy(image):
     image = image.squeeze(0) * 255
@@ -65,3 +68,25 @@ def face_crop(image):
     image = numpy_to_image(image)
 
     return image
+
+class ImageCrop:
+    @classmethod
+    def INPUT_TYPES(s):
+        return {
+            "required": {
+                "image": ("IMAGE", ),
+                "mode": (CROP_MODES, ), 
+            }
+        }
+    
+    RETURN_TYPES = ("IMAGE",)
+    FUNCTION = "preprocess"
+    CATEGORY = "image/preprocessors"
+
+    def preprocess(self, image, mode):
+        if mode == "padding":
+            image = pad_to_square(image) 
+        elif mode == "face_crop":
+            image = face_crop(image)
+        
+        return (image,)
