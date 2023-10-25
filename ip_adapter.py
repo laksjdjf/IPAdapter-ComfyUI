@@ -274,9 +274,7 @@ class CrossAttentionPatch:
 
     def __call__(self, n, context_attn2, value_attn2, extra_options):
         org_dtype = n.dtype
-        frame = inspect.currentframe()
-        outer_frame = frame.f_back
-        cond_or_uncond = outer_frame.f_locals["transformer_options"]["cond_or_uncond"]
+        cond_or_uncond = inspect.currentframe().f_back.f_locals["transformer_options"]["cond_or_uncond"]
         with torch.autocast("cuda", dtype=self.dtype):
             q = n
             k = context_attn2
