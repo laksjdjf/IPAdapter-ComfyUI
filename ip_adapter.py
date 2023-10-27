@@ -5,6 +5,7 @@ from .resampler import Resampler
 import contextlib
 import comfy.model_management
 from comfy.ldm.modules.attention import optimized_attention
+from comfy.clip_vision import clip_preprocess
 
 CURRENT_DIR = os.path.dirname(os.path.realpath(__file__))
 
@@ -200,11 +201,10 @@ class IPAdapter:
         return (new_model, outputs)
     
     def clip_vision_encode(self, clip_vision, image, plus=False):
-        img = torch.clip((255. * image), 0, 255).round().int()
-        img = list(map(lambda a: a, img))
-        inputs = clip_vision.processor(images=img, return_tensors="pt")
+
+        inputs = clip_preprocess(image)
         comfy.model_management.load_model_gpu(clip_vision.patcher)
-        pixel_values = inputs['pixel_values'].to(clip_vision.load_device)
+        pixel_values = inputs.to(clip_vision.load_device)
 
         if clip_vision.dtype != torch.float32:
             precision_scope = torch.autocast
