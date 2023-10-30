@@ -268,6 +268,10 @@ class CrossAttentionPatch:
                 ip_k = ipadapter.ip_layers.to_kvs[self.number*2](uncond_cond)
                 ip_v = ipadapter.ip_layers.to_kvs[self.number*2+1](uncond_cond)
 
+                # Convert ip_k and ip_v to the same dtype as q
+                ip_k = ip_k.to(dtype=q.dtype)
+                ip_v = ip_v.to(dtype=q.dtype)
+                
                 ip_out = optimized_attention(q, ip_k, ip_v, extra_options["n_heads"])
                 
                 if mask is not None:
