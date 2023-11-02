@@ -14,7 +14,7 @@ SD_V12_CHANNELS = [320] * 4 + [640] * 4 + [1280] * 4 + [1280] * 6 + [640] * 6 + 
 SD_XL_CHANNELS = [640] * 8 + [1280] * 40 + [1280] * 60 + [640] * 12 + [1280] * 20
 
 def get_file_list(path):
-    return [file for file in os.listdir(path) if file != "put_models_here.txt"]
+    return [f for f in os.listdir(path) if f.endswith('.bin') or f.endswith('.safetensors')]
 
 def set_model_patch_replace(model, patch_kwargs, key):
     to = model.model_options["transformer_options"]
@@ -27,6 +27,29 @@ def set_model_patch_replace(model, patch_kwargs, key):
         to["patches_replace"]["attn2"][key] = patch
     else:
         to["patches_replace"]["attn2"][key].set_new_condition(**patch_kwargs)
+
+def load_ipadapter(ckpt_path):
+    model = comfy.utils.load_torch_file(ckpt_path, safe_load=True)
+
+    if ckpt_path.lower().endswith(".safetensors"):         
+        st_model = {"image_proj": {}, "ip_adapter": {}}
+        for key in model.keys():
+            if key.startswith("image_proj."):
+                st_model["image_proj"][key.replace("image_proj.", "")] = model[key]
+            elif key.startswith("ip_adapter."):
+                st_model["ip_adapter"][key.replace("ip_adapter.", "")] = model[key]
+        # sort keys
+        model = {"image_proj": st_model["image_proj"], "ip_adapter": {}}
+        sorted_keys = sorted(st_model["ip_adapter"].keys(), key=lambda x: int(x.split(".")[0]))
+        for key in sorted_keys:
+            model["ip_adapter"][key] = st_model["ip_adapter"][key]
+        st_model = None
+
+    if not "ip_adapter" in model.keys() or not model["ip_adapter"]:
+        raise Exception("invalid IPAdapter model {}".format(ckpt_path))
+    
+    return model
+
 
 class ImageProjModel(torch.nn.Module):
     """Projection Model"""
@@ -121,7 +144,7 @@ class IPAdapter:
         self.dtype = torch.float32 if dtype == "fp32" or device.type == "mps" else torch.float16
         self.weight = weight # ip_adapter scale
 
-        ip_state_dict = torch.load(os.path.join(CURRENT_DIR, os.path.join(CURRENT_DIR, "models", model_name)), map_location="cpu")
+        ip_state_dict = load_ipadapter(os.path.join(CURRENT_DIR, os.path.join(CURRENT_DIR, "models", model_name)))
         self.plus = "latents" in ip_state_dict["image_proj"]
 
         # cross_attention_dim is equal to text_encoder output
@@ -262,11 +285,13 @@ class CrossAttentionPatch:
             out = optimized_attention(q, k, v, extra_options["n_heads"])
 
             for weight, cond, uncond, ipadapter, mask in zip(self.weights, self.conds, self.unconds, self.ipadapters, self.masks):
-                uncond_cond = torch.cat([(cond.repeat(batch_prompt, 1, 1), uncond.repeat(batch_prompt, 1, 1))[i] for i in cond_or_uncond], dim=0)
+                k_cond = ipadapter.ip_layers.to_kvs[self.number*2](cond).repeat(batch_prompt, 1, 1)
+                k_uncond = ipadapter.ip_layers.to_kvs[self.number*2](uncond).repeat(batch_prompt, 1, 1)
+                v_cond = ipadapter.ip_layers.to_kvs[self.number*2+1](cond).repeat(batch_prompt, 1, 1)
+                v_uncond = ipadapter.ip_layers.to_kvs[self.number*2+1](uncond).repeat(batch_prompt, 1, 1)
 
-                # k, v for ip_adapter
-                ip_k = ipadapter.ip_layers.to_kvs[self.number*2](uncond_cond)
-                ip_v = ipadapter.ip_layers.to_kvs[self.number*2+1](uncond_cond)
+                ip_k = torch.cat([(k_cond, k_uncond)[i] for i in cond_or_uncond], dim=0)
+                ip_v = torch.cat([(v_cond, v_uncond)[i] for i in cond_or_uncond], dim=0)
 
                 # Convert ip_k and ip_v to the same dtype as q
                 ip_k = ip_k.to(dtype=q.dtype)
