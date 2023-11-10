@@ -1,8 +1,12 @@
+> [!IMPORTANT]
+> **I decided to move my development to the better [cubiq's repository](https://github.com/cubiq/ComfyUI_IPAdapter_plus).**
+> 
+> **This repository may not be available anymore due to future updates of ComfyUI.**
+
+
+
 # IPAdapter-ComfyUI
 [IP-Adapter](https://github.com/tencent-ailab/IP-Adapter)の[ComfyUI](https://github.com/comfyanonymous/ComfyUI)カスタムノードです。
-
-2023/08/27:
-plusモデルの仕様のため、ノードの仕様を変更しました。また複数画像やマスクによる領域指定に対応しました。
 
 # Install
 
